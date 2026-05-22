@@ -5,6 +5,7 @@
 | v1 | 2026-05 | Initial draft |
 | v2 | 2026-05-22 | Scope narrowed, risks documented, chunking logic defined |
 | v3 | 2026-05-22 | Tech stack decided, service architecture defined, data contract added, Python service scoped |
+| v4 | 2026-05-22 | Development methodology updated to TDD; testing approach documented |
 
 ---
 
@@ -296,6 +297,8 @@ Decided in v3.
 | scikit-learn (KMeans) | Color quantisation / palette reduction |
 | Pydantic | Data validation and typed models |
 | pytest | API and service testing |
+
+**Development methodology:** Test-Driven Development (TDD) throughout. Tests are written before implementation on both the Python API and the mobile app, following the Red → Green → Refactor cycle. TDD was chosen over BDD (Behaviour-Driven Development) because this is a solo project with no non-technical stakeholders — BDD's plain English Gherkin syntax adds overhead without benefit here. BDD may be introduced as a learning exercise at the integration test level in a later version.
 
 ### Infrastructure
 | Concern | Decision |
