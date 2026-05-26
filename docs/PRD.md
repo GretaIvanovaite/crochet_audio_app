@@ -6,6 +6,10 @@
 | v2 | 2026-05-22 | Scope narrowed, risks documented, chunking logic defined |
 | v3 | 2026-05-22 | Tech stack decided, service architecture defined, data contract added, Python service scoped |
 | v4 | 2026-05-22 | Development methodology updated to TDD; testing approach documented |
+| v5 | 2026-05-22 | Chart import scope redefined: XLSX from Stitch Fiddle as V1 primary input; image import moved to V2; colour review screen added (reduction, override, naming); data model updated; user flow revised |
+| v6 | 2026-05-22 | Image import restored to V1; sourceColor field added to data contract for accurate colour reduction |
+| v7 | 2026-05-22 | Workflow revised: colour naming combined with colour picker; XLSX and image paths unified at review screen; image quantisation runs before user colour choices |
+| v8 | 2026-05-26 | Import flow split into Import Chart (XLSX or chart image) and Create Chart (design image); Mean Shift replaces upfront KMeans for initial colour detection; KMeans implemented directly in NumPy (not scikit-learn) for user-driven colour reduction; gauge-based grid for Create Chart path; auto-detect grid for chart image import; units preference (cm default) added to settings |
 
 ---
 
@@ -67,15 +71,28 @@ Non-goals:
 
 ## 5. Core User Flow
 
-1. User imports a chart image via the app.
-2. App sends the image to the chart conversion API (Python service).
-3. API returns structured chart data in the standard data contract format.
-4. App stores the converted chart locally (offline from this point).
-5. User starts a playback session.
-6. App narrates chunked stitch instructions.
-7. User advances manually or through assisted timing.
-8. Progress is tracked visually and audibly.
-9. User can recover position after interruptions.
+1. User creates a new project (name, optional yarn/material notes).
+2. User chooses an entry point — **Import Chart** or **Create Chart**:
+   - **Import Chart** — importing an existing chart (XLSX or chart image)
+   - **Create Chart** — converting a design image (photo, illustration, etc.) into a new crochet chart
+3. App sends the file to the chart conversion API (Python service).
+4. API processes the file depending on import type:
+   - **Import Chart — XLSX** → parse all cell background colours directly from the spreadsheet; grid structure taken from the spreadsheet
+   - **Import Chart — Image** → auto-detect the stitch grid from the image; run Mean Shift colour detection on the detected stitch cells
+   - **Create Chart — Design image** → user provides gauge (stitches × rows per 10cm) and target finished size; app calculates grid dimensions and expected finished size; image divided into calculated grid; Mean Shift detects the colour palette
+5. API returns structured chart data including `sourceColor` for every stitch.
+6. App presents the **colour review screen** (identical UI for all three import paths):
+   - Chart preview showing current colour assignments
+   - List of distinct colours — each showing a swatch, stitch count, and name
+   - Tapping a swatch opens a **combined colour picker + name input**: change the colour and name it in one place; names are stored per colour and used for narration
+   - **Colour count reduction** — slider/stepper reducing distinct colours; each stitch independently finds its nearest remaining match from its `sourceColor`
+   - **XLSX only**: option to restore original chart colours and reset back to spreadsheet values
+7. User confirms — chart saved locally to MMKV. Fully offline from this point.
+8. User starts a playback session.
+9. App narrates chunked stitch instructions using yarn colour names.
+10. User advances manually or through assisted timing.
+11. Progress is tracked visually and audibly.
+12. User can recover position after interruptions.
 
 ---
 
@@ -119,19 +136,66 @@ Non-goals:
 
 ---
 
-## 7. Chart Import and Generation
+## 7. Chart Import
 
-Supported V1 inputs:
-- clean chart images
-- photos of physical charts
+V1 offers two entry points, with three underlying import paths:
 
-User-configurable generation settings:
-- stitch width
-- stitch height
-- number of colors
-- color simplification level
+- **Import Chart** — the user has an existing chart to import, as either a Stitch Fiddle XLSX file or a chart image (photo or scan of an existing grid-based chart)
+- **Create Chart** — the user has a design image (photo, illustration, downloaded image) they want to convert into a tapestry or mosaic crochet chart
 
-Important limitation: V1 should prioritize controlled/clean imports rather than arbitrary image parsing. Manual cleanup/editing tools may be required after generation and are deferred to V2.
+All three paths converge at the same colour review screen.
+
+### Import Chart — XLSX
+
+Users export their chart from [Stitch Fiddle](https://www.stitchfiddle.com) as an XLSX file. The Python API parses the Excel grid: each cell represents one stitch, and the cell background colour (as a hex value) is the stitch colour. The grid structure (rows × columns) is taken directly from the spreadsheet. This approach is highly accurate because both the colour data and the grid structure are already defined — no image processing or approximation is required.
+
+The Python library used for XLSX parsing is **openpyxl**, which provides direct access to cell fill colours.
+
+### Import Chart — Image
+
+For photos or scans of existing grid-based charts (hand-drawn, printed, or photographed). The Python API:
+- Uses Pillow to load and preprocess the image
+- Uses NumPy for pixel array operations
+- Auto-detects the stitch grid from the image (identifies the regular grid structure and stitch boundaries)
+- Samples the dominant colour of each detected stitch cell
+- Runs **Mean Shift** colour clustering (scikit-learn) on the sampled stitch colours to identify the natural colour palette — no K (number of colours) needs to be specified upfront; Mean Shift finds natural colour groupings in colour space without being told how many to look for
+- Stores the original per-stitch source colour alongside the detected assignment (see `sourceColor` in Section 20)
+
+### Create Chart — Design Image
+
+For photos, illustrations, or any image the user wants to convert into a new crochet chart. Because no grid exists in the source image, the user provides:
+- **Gauge** — stitches × rows per 10cm (entered in-app before upload; cm is the default unit, changeable in Settings)
+- **Target finished size** — desired width × height in the user's chosen unit
+
+The app calculates:
+- Grid dimensions (stitches × rows) from the gauge and target size
+- Expected finished size, shown back to the user before processing begins
+
+The image is divided into the calculated grid; each cell's dominant colour is sampled. **Mean Shift** colour clustering then identifies the natural colour palette from the sampled cells.
+
+### Two-stage colour pipeline (both image paths)
+
+Both image import paths use a two-stage colour pipeline:
+
+**Stage 1 — Mean Shift (API, automatic)**
+
+Detects the colours genuinely present in the image without requiring a number of colours to be specified upfront. Each cluster returned by Mean Shift becomes a palette colour; cluster size gives the stitch count for that colour. This is the starting palette shown on the colour review screen.
+
+**Stage 2 — KMeans or nearest-match (colour review screen, user-driven)**
+
+When the user adjusts the palette on the review screen, two tools handle different cases:
+- **"Reduce to N colours"** (user specifies a count, not which colours): KMeans runs with K=N on the `sourceColor` values to find the optimal N colours to represent the chart. KMeans is implemented directly in NumPy rather than using scikit-learn — the algorithm is simple enough (assign each point to its nearest centroid, recompute centroids, repeat until stable) to implement cleanly in about 20 lines of NumPy, and keeps the scikit-learn dependency scoped to Mean Shift only.
+- **Specific colour changes** (user modifies or removes particular colours): nearest-match from `sourceColor` using RGB Euclidean distance reassigns each stitch to its closest remaining palette colour
+
+### Colour review screen (V1, all import paths)
+
+After any import, all three paths arrive at an identical review screen:
+- Chart preview showing current colour assignments
+- List of distinct colours — swatch, stitch count, and colour name
+- Tapping a swatch opens a **combined colour picker + name input** — the user changes the colour and names it in one interaction. Colour names are stored per colour hex and used for narration.
+- **Colour count reduction** — slider/stepper; if a count is specified without choosing colours, KMeans finds the optimal palette; if colours are modified directly, nearest-match from `sourceColor` reassigns stitches. LAB ΔE distance (more perceptually accurate than RGB Euclidean) may replace nearest-match in V2.
+- **XLSX only**: reset option to restore original spreadsheet colours
+- All colour operations happen client-side. No further API calls after initial import.
 
 ---
 
@@ -208,7 +272,7 @@ Background audio and lock-screen media controls are handled natively by `react-n
 
 ## 13. Major Risks and Open Questions
 
-1. **Image-to-chart conversion complexity** — scoped to KMeans color quantisation in v3. Approach: Pillow + NumPy for preprocessing, scikit-learn KMeans for color reduction, run-length encoding to produce chart rows. Risk remains for low-quality inputs; manual correction UI deferred to V2.
+1. **Image-to-chart conversion complexity** — updated in v8. Approach: Pillow + NumPy for preprocessing; Mean Shift (scikit-learn) for initial colour detection without requiring a colour count; auto-detect grid for chart images; gauge-based grid calculation for design images; KMeans for user-driven colour reduction; run-length encoding to produce chart rows. Risk remains for low-quality photo inputs where auto-detect grid may struggle; manual correction UI deferred to V2.
 2. **Synchronization risk** — auto-advance may desync from actual crafting pace; users may stop mid-chunk without interaction.
 3. **Scope creep risk** — chart editing tools can become a separate product category; project management features may dilute differentiation.
 4. **Playback trust** — incorrect pacing or progression reduces trust rapidly.
@@ -292,9 +356,11 @@ Decided in v3.
 |---|---|
 | Python 3 | Language |
 | FastAPI | REST API framework |
-| Pillow | Image loading and preprocessing |
-| NumPy | Pixel array operations |
-| scikit-learn (KMeans) | Color quantisation / palette reduction |
+| openpyxl | XLSX parsing — reads Stitch Fiddle cell background colours directly |
+| Pillow | Image loading and preprocessing — image and design import paths |
+| NumPy | Pixel array operations — image and design import paths |
+| scikit-learn (Mean Shift) | Initial colour detection — finds natural colour groups without requiring K to be specified; used for both image import paths |
+| NumPy (custom KMeans) | User-driven colour reduction — KMeans implemented directly in NumPy rather than scikit-learn; algorithm is simple enough to write cleanly without a library, keeping the scikit-learn dependency scoped to Mean Shift only |
 | Pydantic | Data validation and typed models |
 | pytest | API and service testing |
 
@@ -315,21 +381,29 @@ Decided in v3.
 The app is two components sharing one data contract:
 
 ```
-[Chart image]
-     |
-     | POST /convert (multipart upload)
-     v
-[Python FastAPI API]
-  - Pillow: load + preprocess image
-  - NumPy: pixel array manipulation
-  - KMeans: color quantisation
-  - Run-length encode rows → ChartResponse JSON
-     |
-     | ChartResponse JSON
-     v
-[Expo mobile app]
-  - Stores ChartResponse in MMKV (offline from here)
-  - All playback, chunking, narration, state from local data
+[Import Chart — XLSX]     [Import Chart — Image]     [Create Chart — Design Image]
+        |                          |                            |
+  openpyxl parses            auto-detect grid           user provides gauge
+  cell colours + grid        Mean Shift colours          + target size
+                                   |                    calculate grid
+                                   |                    Mean Shift colours
+                                   |                            |
+                     +-------------+----------------------------+
+                     |
+                     | POST /convert (multipart upload)
+                     v
+            [Python FastAPI API]
+          - openpyxl / Pillow / NumPy
+          - Mean Shift: initial colour detection
+          - Run-length encode rows → ChartResponse JSON
+                     |
+                     | ChartResponse JSON
+                     v
+            [Expo mobile app]
+          - Colour review screen
+            (KMeans or nearest-match, client-side)
+          - Stores confirmed chart in MMKV (offline from here)
+          - All playback, chunking, narration, state from local data
 ```
 
 The API is called once per chart import. Everything after that is offline.
@@ -340,31 +414,37 @@ The API is called once per chart import. Everything after that is offline.
 
 The canonical JSON structure shared between the Python API and the TypeScript mobile app.
 
+`ChunkItem` includes a `name` field (populated by the user during the colour review screen) and a `sourceColor` field (the original colour from the source file, preserved for accurate colour reduction).
+
+### Why `sourceColor` matters
+
+When a user reduces the number of distinct colours, each stitch must independently find its closest match from the remaining palette — not inherit the result of a palette-level merge. To do this accurately, the app compares each stitch's **original** source colour against the remaining options, not its currently assigned colour. Without `sourceColor`, repeated reductions would compound errors. For XLSX import, `sourceColor` is the exact cell hex from the spreadsheet. For image import (both Import Chart — Image and Create Chart paths), it is the dominant colour of the stitch cell sampled from the source image before any user-driven reduction.
+
 ```json
 {
   "rows": [
     {
       "rowNumber": 1,
       "chunks": [
-        { "color": "#3d2b1f", "count": 5 },
-        { "color": "#ffffff", "count": 3 },
-        { "color": "#3d2b1f", "count": 2 }
-      ]
-    },
-    {
-      "rowNumber": 2,
-      "chunks": [
-        { "color": "#ffffff", "count": 4 },
-        { "color": "#3d2b1f", "count": 6 }
+        { "sourceColor": "#3d2b1f", "color": "#3d2b1f", "name": "Toffee Brown", "count": 5 },
+        { "sourceColor": "#f8f4e8", "color": "#ffffff", "name": "Cream", "count": 3 },
+        { "sourceColor": "#3d2b1f", "color": "#3d2b1f", "name": "Toffee Brown", "count": 2 }
       ]
     }
   ]
 }
 ```
 
+`sourceColor` is set by the API and never changed. `color` is the currently assigned palette colour and may be updated by the user during the review step. `name` is always user-supplied.
+
 ### TypeScript type (mobile)
 ```ts
-export interface ChunkItem { color: string; count: number }
+export interface ChunkItem {
+  sourceColor: string  // original colour from source — never mutated
+  color: string        // currently assigned palette colour
+  name: string         // yarn name for narration — user supplied
+  count: number
+}
 export interface Row { rowNumber: number; chunks: ChunkItem[] }
 export interface Chart { rows: Row[] }
 ```
@@ -372,7 +452,9 @@ export interface Chart { rows: Row[] }
 ### Pydantic model (API)
 ```python
 class ChunkItem(BaseModel):
-    color: str
+    sourceColor: str       # original colour from source file — never changed
+    color: str             # assigned palette colour — same as sourceColor on first return
+    name: str = ""         # empty on API response; populated by user during colour review
     count: int
 
 class Row(BaseModel):
@@ -383,4 +465,4 @@ class ChartResponse(BaseModel):
     rows: list[Row]
 ```
 
-Colors are stored as hex strings. The API returns the closest palette color; the mobile app is responsible for display labeling (e.g. mapping `#3d2b1f` → "brown" based on user-defined palette names, V2 feature).
+Colours are stored as hex strings. The `name` field is what gets narrated during playback — the mobile app must not narrate the hex value directly. If a name is empty at playback time, the app should prompt the user to complete the colour review step.
