@@ -10,6 +10,7 @@
 | v6 | 2026-05-22 | Image import restored to V1; sourceColor field added to data contract for accurate colour reduction |
 | v7 | 2026-05-22 | Workflow revised: colour naming combined with colour picker; XLSX and image paths unified at review screen; image quantisation runs before user colour choices |
 | v8 | 2026-05-26 | Import flow split into Import Chart (XLSX or chart image) and Create Chart (design image); Mean Shift replaces upfront KMeans for initial colour detection; KMeans implemented directly in NumPy (not scikit-learn) for user-driven colour reduction; gauge-based grid for Create Chart path; auto-detect grid for chart image import; units preference (cm default) added to settings |
+| v9 | 2026-05-26 | Full user flow and requirements defined: multi-chart projects; project rename and delete; notes at project and chart level; loading states and error handling for import; back navigation from colour review; single-colour warning; completion screen; row number repositioning; row narration on change only; narration format user setting; chunk size setting; pacing profile overridable per project; Settings section added (units, narration format, chunk size, pacing, theme, accessible mode) |
 
 ---
 
@@ -71,28 +72,26 @@ Non-goals:
 
 ## 5. Core User Flow
 
-1. User creates a new project (name, optional yarn/material notes).
-2. User chooses an entry point — **Import Chart** or **Create Chart**:
-   - **Import Chart** — importing an existing chart (XLSX or chart image)
-   - **Create Chart** — converting a design image (photo, illustration, etc.) into a new crochet chart
-3. App sends the file to the chart conversion API (Python service).
-4. API processes the file depending on import type:
-   - **Import Chart — XLSX** → parse all cell background colours directly from the spreadsheet; grid structure taken from the spreadsheet
-   - **Import Chart — Image** → auto-detect the stitch grid from the image; run Mean Shift colour detection on the detected stitch cells
-   - **Create Chart — Design image** → user provides gauge (stitches × rows per 10cm) and target finished size; app calculates grid dimensions and expected finished size; image divided into calculated grid; Mean Shift detects the colour palette
-5. API returns structured chart data including `sourceColor` for every stitch.
-6. App presents the **colour review screen** (identical UI for all three import paths):
-   - Chart preview showing current colour assignments
-   - List of distinct colours — each showing a swatch, stitch count, and name
-   - Tapping a swatch opens a **combined colour picker + name input**: change the colour and name it in one place; names are stored per colour and used for narration
-   - **Colour count reduction** — slider/stepper reducing distinct colours; each stitch independently finds its nearest remaining match from its `sourceColor`
-   - **XLSX only**: option to restore original chart colours and reset back to spreadsheet values
-7. User confirms — chart saved locally to MMKV. Fully offline from this point.
-8. User starts a playback session.
-9. App narrates chunked stitch instructions using yarn colour names.
-10. User advances manually or through assisted timing.
-11. Progress is tracked visually and audibly.
-12. User can recover position after interruptions.
+### Project creation
+1. User creates a new project (name, optional project-level notes).
+2. A project holds multiple charts — e.g. front and back panels, or multiple colourway sections of a pattern.
+
+### Adding a chart
+3. User chooses an entry point — **Import Chart** or **Create Chart**:
+   - **Import Chart → XLSX** — file picker → API call → colour review
+   - **Import Chart → Image** — camera/gallery → API call → colour review
+   - **Create Chart → Design image** — camera/gallery (image first) → gauge input (stitches × rows per 10cm + target finished size) → API call → colour review
+4. During the API call, a loading screen shows a spinner with step-by-step status labels ("Uploading…", "Detecting colours…", "Building chart…"). If the call fails, the app retries once silently, then shows an error message with a Retry button.
+5. The **colour review screen** is identical for all three import paths. A back button returns to the import step without saving. If only one colour is detected, a warning is shown but the user can still proceed.
+6. User names colours and optionally adjusts the palette, then confirms. The chart is saved to MMKV — fully offline from this point. Per-chart notes can be added here or from the project home screen later.
+
+### Playback
+7. From the project home screen, user starts or resumes any chart in the project.
+8. App narrates chunked stitch instructions using yarn colour names in the user's chosen format (number first or colour first). Row number is announced when moving to a new row.
+9. User advances manually or via assisted timing. Lock screen media controls mirror the in-app controls.
+10. Progress is tracked visually (completed stitches and current chunk highlighted) and audibly.
+11. If the user loses their place, they enter a row number to jump playback there.
+12. When the final chunk of the last row completes, a **completion screen** is shown with a summary.
 
 ---
 
@@ -100,13 +99,16 @@ Non-goals:
 
 ### A. Audio Playback Engine
 - spoken stitch instructions
-- chunk-based narration
+- chunk-based narration (chunk size adjustable in Settings)
+- narration format: number first ("5 in Toffee Brown") or colour first ("Toffee Brown: 5") — user setting
+- row number announced when moving to a new row (not repeated on chunk replay or row replay)
 - narration speed control
 - repeat previous chunk
 - back/forward navigation
 - row replay
 - full row narration mode
 - progress persistence
+- **Accessible mode** — narration text scrolls on screen in sync with audio, for users with audio processing difficulties or in noisy environments
 
 ### B. Playback Modes
 1. **Manual Mode** — user manually advances chunks
@@ -124,15 +126,27 @@ Non-goals:
 ### D. Visual Progress Tracking
 - completed stitches highlighted
 - current chunk highlighted
-- visual recovery support
-- manual repositioning support
+- row number input for manual repositioning — user types or scrolls to a row number to jump playback there
+- **completion screen** — shown when the final chunk of the last row completes; displays total rows completed with a button to return to the project home screen
 
 ### E. Lightweight Project Management
-- save projects
-- associate charts with projects
-- save playback state
-- project notes
-- yarn/material notes
+- create, rename, and delete projects (delete requires confirmation prompt)
+- a project holds multiple charts (e.g. multiple pattern sections or panels)
+- per-chart progress tracked independently; playback state saved per chart
+- project home screen shows: all charts with per-chart progress, overall project progress, project-level notes, and Start/Resume button per chart
+- project-level notes (yarn weight, hook size, general notes)
+- per-chart notes (colour substitutions, section-specific notes)
+
+### F. Settings
+
+| Setting | Options | Default |
+|---|---|---|
+| Units | cm / inches | cm |
+| Narration format | Number first ("5 in Colour") / Colour first ("Colour: 5") | Number first |
+| Chunk size | Adjustable — max colour groups per narration chunk | TBD |
+| Pacing profile | Slow / Standard / Fast — global default, overridable per project | Standard |
+| Theme | Light / Dark | System default |
+| Accessible mode | On / Off — narration text scrolls on screen in sync with audio | Off |
 
 ---
 
@@ -163,15 +177,15 @@ For photos or scans of existing grid-based charts (hand-drawn, printed, or photo
 
 ### Create Chart — Design Image
 
-For photos, illustrations, or any image the user wants to convert into a new crochet chart. Because no grid exists in the source image, the user provides:
-- **Gauge** — stitches × rows per 10cm (entered in-app before upload; cm is the default unit, changeable in Settings)
+For photos, illustrations, or any image the user wants to convert into a new crochet chart. The user picks the image first (camera or gallery), then provides:
+- **Gauge** — stitches × rows per 10cm (cm is the default unit, changeable in Settings)
 - **Target finished size** — desired width × height in the user's chosen unit
 
-The app calculates:
-- Grid dimensions (stitches × rows) from the gauge and target size
-- Expected finished size, shown back to the user before processing begins
+The app calculates and shows back to the user:
+- Grid dimensions (stitches × rows)
+- Expected finished size
 
-The image is divided into the calculated grid; each cell's dominant colour is sampled. **Mean Shift** colour clustering then identifies the natural colour palette from the sampled cells.
+The user confirms, then the image is uploaded. The image is divided into the calculated grid; each cell's dominant colour is sampled. **Mean Shift** colour clustering then identifies the natural colour palette from the sampled cells.
 
 ### Two-stage colour pipeline (both image paths)
 
@@ -190,6 +204,8 @@ When the user adjusts the palette on the review screen, two tools handle differe
 ### Colour review screen (V1, all import paths)
 
 After any import, all three paths arrive at an identical review screen:
+- **Back button** — returns to the import step without saving; allows the user to pick a different file
+- **Single-colour warning** — if only one colour is detected, a warning is shown ("Only 1 colour detected — your image may not contain a chart"); the user can still proceed or go back
 - Chart preview showing current colour assignments
 - List of distinct colours — swatch, stitch count, and colour name
 - Tapping a swatch opens a **combined colour picker + name input** — the user changes the colour and names it in one interaction. Colour names are stored per colour hex and used for narration.
